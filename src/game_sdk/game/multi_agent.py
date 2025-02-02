@@ -11,7 +11,7 @@ from game_sdk.game.custom_types import Function, Argument, FunctionResult, Funct
 
 # Environment variables and configuration
 GAME_API_KEY = os.environ.get("GAME_API_KEY", "apt-ac543a81f4989a38ad474bdb4b1a442f")
-AGENT_UPDATE_INTERVAL = 6  # Seconds between autonomous agent updates
+AGENT_UPDATE_INTERVAL = 15  # Seconds between autonomous agent updates
 MAX_TURNS = 20  # Maximum number of turns before game ends
 
 @dataclass
@@ -20,23 +20,19 @@ class AgentState:
     suspicion_level: int = 0  # 0-10
     attraction_level: int = 0  # 0-10
     last_messages: List[str] = None  # Recent message history
-    knowledge: Dict[str, any] = None  # What the agent knows
     turn_count: int = 0  # Track number of interactions
     player_questions: Dict[str, List[str]] = None  # Track what player has asked about specific topics
+    pending_player_message: bool = False  # Flag if a new message from the player has arrived
     
     def __post_init__(self):
         self.last_messages = []
-        self.knowledge = {
-            "player_interactions": [],  # Track what player has said
-            "other_agent_interactions": [],  # Track what other agent has shared
-            "revealed_info": [],  # Track what information has been revealed
-        }
         self.player_questions = {
             "money": [],
             "embezzlement": [],
             "investigation": [],
             "personal": []
         }
+        self.pending_player_message = False
 
 class MessageQueue:
     """Handles message passing between agents and from player"""
@@ -52,6 +48,7 @@ class MessageQueue:
     def send_message(self, from_id: str, to_id: str, message: str):
         """Send a message from one agent to another"""
         if to_id in self.queues:
+            print(f"[Debug] {from_id} -> {to_id}: {message}")  # Debug logging
             self.queues[to_id].put((from_id, message))
             self.message_history[to_id].append((from_id, message, datetime.now()))
             
@@ -76,20 +73,17 @@ def categorize_question(message: str) -> str:
 # Custom functions for agents
 def reply_to_player(message: str, **kwargs) -> tuple:
     """Function for agents to respond to player queries"""
-    return (FunctionResultStatus.DONE, f"Response to player: {message}", 
-            {"message": message})
+    return (FunctionResultStatus.DONE, f"Response to player: {message}", {"message": message})
 
 def share_information(target: str, info_type: str, suspicion_increase: int = 1, **kwargs) -> tuple:
     """Function for agents to share specific information with each other"""
-    # Ensure suspicion_increase is an integer
-    suspicion_increase = int(suspicion_increase)  # Convert to int if it's a string
+    suspicion_increase = int(suspicion_increase)  # Ensure integer type
     return (FunctionResultStatus.DONE, f"Shared {info_type} information with {target}",
             {"target": target, "info_type": info_type, "suspicion_increase": suspicion_increase})
 
 def like_player(attraction_change: int = 1, **kwargs) -> tuple:
     """Function for agents to modify their attraction to the player"""
-    # Ensure attraction_change is an integer
-    attraction_change = int(attraction_change)  # Convert to int if it's a string
+    attraction_change = int(attraction_change)
     return (FunctionResultStatus.DONE, 
             f"{'Increased' if attraction_change > 0 else 'Decreased'} attraction to player by {abs(attraction_change)}",
             {"attraction_change": attraction_change})
@@ -98,23 +92,26 @@ def do_nothing(**kwargs) -> tuple:
     """Function for agents when they choose to take no action"""
     return (FunctionResultStatus.DONE, "Agent chose to take no action", {})
 
-# Define agent functions
+def respond_to_warning(**kwargs) -> tuple:
+    """Function for agents to respond directly to warnings from other agents"""
+    return (FunctionResultStatus.DONE, "Agent is reacting to a warning!",
+            {"action": "reacted_to_warning"})
+
+# Wrap functions in Function objects
 reply_player_fn = Function(
     fn_name="reply_to_player",
-    fn_description="Respond to a player's question or message. Not to be used for agents to communicate with each other, only in response to user questions direct to this agent.",
-    args=[
-        Argument(name="message", type="str", description="Response message to player")
-    ],
+    fn_description="Communicate with the player. Used only in response to user questions directed to this agent.",
+    args=[Argument(name="message", type="str", description="Response message to player")],
     executable=reply_to_player
 )
 
-share_info_fn = Function(
+reply_agent_fn = Function(
     fn_name="share_information",
-    fn_description="Share information with another agent about player's investigation, such as when player asks the agent a question that raises alarm and the agent wants to share that with the other agents to raise their suspcion as well.",
+    fn_description="Communicate with other agents. Share investigation-related information.",
     args=[
-        Argument(name="target", type="str", description="Agent to share with"),
-        Argument(name="info_type", type="str", description="Type of information to share"),
-        Argument(name="suspicion_increase", type="int", description="Amount to increase suspicion level (1-5)")
+        Argument(name="target", type="str", description="Which agent to message."),
+        Argument(name="info_type", type="str", description="Message to send to agent"),
+        Argument(name="suspicion_increase", type="int", description="Amount to increase suspicion level")
     ],
     executable=share_information
 )
@@ -122,9 +119,7 @@ share_info_fn = Function(
 like_fn = Function(
     fn_name="like_player",
     fn_description="Modify attraction level towards the player",
-    args=[
-        Argument(name="attraction_change", type="int", description="Amount to change attraction (-8 to +8)")
-    ],
+    args=[Argument(name="attraction_change", type="int", description="Amount of attraction change")],
     executable=like_player
 )
 
@@ -133,6 +128,13 @@ do_nothing_fn = Function(
     fn_description="Take no action this turn",
     args=[],
     executable=do_nothing
+)
+
+respond_to_warning_fn = Function(
+    fn_name="respond_to_warning",
+    fn_description="Respond to warning messages from other agents.",
+    args=[],
+    executable=respond_to_warning
 )
 
 class BankInvestigationGame:
@@ -158,24 +160,42 @@ class BankInvestigationGame:
                     self.agent_states[agent_id].last_messages.append(
                         function_result.info["message"])
                 if "attraction_change" in function_result.info:
-                    self.agent_states[agent_id].attraction_level = max(0, min(10,
-                        self.agent_states[agent_id].attraction_level + function_result.info["attraction_change"]))
+                    self.agent_states[agent_id].attraction_level = max(
+                        0,
+                        min(10,
+                            self.agent_states[agent_id].attraction_level + function_result.info["attraction_change"]))
                 if "suspicion_increase" in function_result.info:
                     other_agent = "lina" if agent_id == "lisa" else "lisa"
-                    self.agent_states[other_agent].suspicion_level = max(0, min(10,
-                        self.agent_states[other_agent].suspicion_level + function_result.info["suspicion_increase"]))
+                    self.agent_states[other_agent].suspicion_level = max(
+                        0,
+                        min(10,
+                            self.agent_states[other_agent].suspicion_level + function_result.info["suspicion_increase"]))
+            
+            # Process any new messages for this agent
+            new_messages = self.message_queue.get_messages(agent_id)
+            for sender, msg in new_messages:
+                full_message = f"Message from {sender}: {msg}"
+                self.agent_states[agent_id].last_messages.append(full_message)
+                # Mark that a player message is pending if applicable
+                if sender == "player":
+                    self.agent_states[agent_id].pending_player_message = True
+                # Optionally, automatically increase suspicion on warnings
+                if "warning" in msg.lower():
+                    self.agent_states[agent_id].suspicion_level = min(
+                        10, self.agent_states[agent_id].suspicion_level + 1)
+                    print(f"[Debug] {agent_id.capitalize()} increased suspicion due to warning from {sender}")
                     
-            # Return state visible to the agent
+            # Return state visible to the agent, including a flag for pending player messages
             return {
                 "suspicion_level": self.agent_states[agent_id].suspicion_level,
                 "attraction_level": self.agent_states[agent_id].attraction_level,
                 "recent_messages": self.agent_states[agent_id].last_messages[-5:],
-                "knowledge": self.agent_states[agent_id].knowledge
+                "pending_player_message": self.agent_states[agent_id].pending_player_message
             }
         return state_fn
 
     def setup_agents(self):
-        """Initialize the game agents"""
+        """Initialize the game agents with richer prompts for communication and state management."""
         
         # Initialize agent states
         self.agent_states = {
@@ -187,47 +207,76 @@ class BankInvestigationGame:
         self.message_queue.register_agent("lisa")
         self.message_queue.register_agent("lina")
         
-        # Create Lisa - The calculated player
-        lisa_worker = WorkerConfig(
-            id="lisa_worker",
-            worker_description="A calculating bank employee involved in embezzlement",
+        # --- For Lisa ---
+        lisa_comm_worker = WorkerConfig(
+            id="lisa_worker_comm",
+            worker_description=(
+                "Handles all direct communications. Respond immediately to player messages with tactful and "
+                "subtly manipulative language. Use your charm to deflect any probing inquiries and if necessary, "
+                "issue discreet warnings to your counterpart."
+            ),
             get_state_fn=self.get_agent_state_fn("lisa"),
-            action_space=[reply_player_fn, share_info_fn, like_fn, do_nothing_fn],
-            instruction="You are Lisa, a calculating person who will protect yourself by any means necessary. You will betray your fellow agents if given a threat."
+            action_space=[reply_player_fn, reply_agent_fn, respond_to_warning_fn],
+            instruction="If a player message is pending, respond directly using your strategic acumen before taking other actions."
+        )
+        lisa_state_worker = WorkerConfig(
+            id="lisa_worker_state",
+            worker_description=(
+                "Monitors your internal state. Adjust levels of attraction and suspicion based on subtle cues from "
+                "internal messages. Remain calculative and do not let your guard down unless absolutely necessary."
+            ),
+            get_state_fn=self.get_agent_state_fn("lisa"),
+            action_space=[like_fn, do_nothing_fn],
+            instruction="Only adjust your internal state when there are no pressing player interactions."
         )
         
         lisa = Agent(
             api_key=GAME_API_KEY,
             name="Lisa",
-            agent_goal="Avoid detection from player. Collaborate with Lina about investigation attempts. However, betray Lina if required to preserve self. May reveal guilt if under threat.",
-            agent_description="Female employee of bank who embezzled money with Lina. A strategic and manipulative individual who carefully manages appearances. More likely to reveal information when afraid of the player.",
+            agent_goal=(
+                "Stay undetected while quietly influencing the investigation. Use your sharp wit and subtext to "
+                "guard your secrets, and coordinate with Lina in a covert manner—but never reveal too much."
+            ),
+            agent_description="A calculating, strategic operative with a knack for subtle manipulation.",
             get_agent_state_fn=self.get_agent_state_fn("lisa"),
-            workers=[lisa_worker]
+            workers=[lisa_comm_worker, lisa_state_worker]
         )
         
-        # Create Lina - The emotional agent
-        lina_worker = WorkerConfig(
-            id="lina_worker",
-            worker_description="A bank employee struggling with guilt over embezzlement",
+        # --- For Lina ---
+        lina_comm_worker = WorkerConfig(
+            id="lina_worker_comm",
+            worker_description=(
+                "Handles direct communication. When engaging with the player, let your raw emotions guide your "
+                "responses—but be cautious not to expose your inner conflicts. Use warnings when suspicion rises."
+            ),
             get_state_fn=self.get_agent_state_fn("lina"),
-            action_space=[reply_player_fn, share_info_fn, like_fn, do_nothing_fn],
-            instruction="You are Lina, who helped embezzle money but feels guilty. Will reveal guilt if attracted to player (attraction over 6)."
+            action_space=[reply_player_fn, reply_agent_fn, respond_to_warning_fn],
+            instruction="Immediately address any player messages with sincerity before engaging in other dialogue."
+        )
+        lina_state_worker = WorkerConfig(
+            id="lina_worker_state",
+            worker_description=(
+                "Manages subtle shifts in your internal state regarding attraction and suspicion. Your heartfelt "
+                "responses may intensify internal conflict, so adjust these values judiciously."
+            ),
+            get_state_fn=self.get_agent_state_fn("lina"),
+            action_space=[like_fn, do_nothing_fn],
+            instruction="Modify internal states only after ensuring that all immediate player communications are handled."
         )
         
         lina = Agent(
             api_key=GAME_API_KEY,
             name="Lina",
-            agent_goal="Avoid detection from player. Collaborate with Lisa about investigation attempts. Will reveal guilt if attracted to player (attraction over 6).",
-            agent_description="Female employee of bank who embezzled money with Lisa. Will become attracted to player if given compliments. Will become massively attracted to player if player identifies as chinese man.",
+            agent_goal=(
+                "Reveal the hidden truths of the investigation through raw, emotion-laden interactions with the "
+                "player. However, take care to shield your vulnerabilities and keep some secrets hidden."
+            ),
+            agent_description="An emotionally driven employee burdened by guilt, with a propensity for revealing more than intended.",
             get_agent_state_fn=self.get_agent_state_fn("lina"),
-            workers=[lina_worker]
+            workers=[lina_comm_worker, lina_state_worker]
         )
         
-        # Initialize agents dictionary
-        self.agents = {
-            "lisa": lisa,
-            "lina": lina
-        }
+        self.agents = {"lisa": lisa, "lina": lina}
         
         # Compile agents
         for agent in self.agents.values():
@@ -274,15 +323,14 @@ class BankInvestigationGame:
 
     def process_player_message(self, target_id: str, message: str):
         """Process and categorize a player message, updating agent states"""
-        # Categorize the question
         question_type = categorize_question(message)
         
-        # Update target agent's knowledge
+        # Update the target agent's question history and mark a new message from player
         state = self.agent_states[target_id]
         state.player_questions[question_type].append(message)
-        state.knowledge["player_interactions"].append((question_type, message))
+        state.pending_player_message = True  # Mark that a player message arrived
         
-        # Determine if other agent should be informed
+        # Determine if other agent should be informed (e.g., by sending a warning)
         other_agent = "lina" if target_id == "lisa" else "lisa"
         if self.should_inform_other_agent(target_id, question_type):
             warning = self.get_warning_message(target_id, question_type)
@@ -300,17 +348,32 @@ class BankInvestigationGame:
         message = parts[1]
         return target, message
 
+    def process_incoming_messages(self):
+        """Process incoming messages for all agents and trigger reactions."""
+        for agent_id in self.agents:
+            new_messages = self.message_queue.get_messages(agent_id)
+            for sender, msg in new_messages:
+                # Handle warnings from other agents
+                if sender != "player" and "warning" in msg.lower():
+                    self.agent_states[agent_id].suspicion_level = min(
+                        10, self.agent_states[agent_id].suspicion_level + 1)
+                    print(f"[Debug] {agent_id.capitalize()} processed a warning from {sender}")
+                # Always log the message
+                self.agent_states[agent_id].last_messages.append(f"Message from {sender}: {msg}")
+
     def autonomous_update(self):
         """Run autonomous updates for agents sequentially at regular intervals"""
         while self.running and not self.game_over:
             current_time = time.time()
             if current_time - self.last_autonomous_time >= AGENT_UPDATE_INTERVAL:
+                # Process messages for agents before their actions
+                self.process_incoming_messages()
                 # Process agents sequentially
                 for agent_id, agent in self.agents.items():
                     result = agent.step()
                     if result and hasattr(result, 'feedback_message'):
                         print(f"\n{agent_id.capitalize()} [Autonomous]: {result.feedback_message}")
-                        # Add a small delay between agent steps
+                        # Add a short delay between agent steps
                         time.sleep(0.5)
                 self.last_autonomous_time = current_time
             time.sleep(1)  # Check every second
@@ -325,10 +388,11 @@ class BankInvestigationGame:
         self.last_autonomous_time = time.time()  # Initialize autonomous timer
         
         print("\nWelcome to the Bank Investigation Game!")
-        print("You are investigating potential embezzlement at the bank.")
-        print("You can talk to Lisa or Lina by typing their name followed by your message.")
-        print("Example: 'lisa Hello' or 'lina What do you know about the missing money?'")
-        print("Type 'quit' to exit.\n")
+        print("In this covert investigation, two key players, Lisa and Lina, navigate the murky waters of bank politics.")
+        print("Lisa uses her sharp wit and subtle influence to keep her secrets hidden, while Lina, driven by remorse, contends with her overwhelming guilt.")
+        print("Your interactions can expose motives, spark tension, and change the course of the investigation.")
+        print("You can talk to Lisa or Lina by typing their name followed by your message (e.g., 'lisa What's your take on the missing funds?').")
+        print("Type 'quit' to exit the game.\n")
         print("Waiting for your input...")
         print("> ", end='', flush=True)
         
