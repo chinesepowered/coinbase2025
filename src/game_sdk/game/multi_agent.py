@@ -373,7 +373,11 @@ class BankInvestigationGame:
                     result = agent.step()
                     if result and hasattr(result, 'feedback_message'):
                         print(f"\n{agent_id.capitalize()} [Autonomous]: {result.feedback_message}")
-                        # Add a short delay between agent steps
+                        # Check win condition: if guilt is admitted, end the game
+                        if self.check_guilt_admission(result.feedback_message):
+                            print("\nCongratulations, you've uncovered the truth! The agents have admitted their guilt. You win!")
+                            self.game_over = True
+                            break
                         time.sleep(0.5)
                 self.last_autonomous_time = current_time
             time.sleep(1)  # Check every second
@@ -397,32 +401,29 @@ class BankInvestigationGame:
         print("> ", end='', flush=True)
         
         while True:
+            # End the loop if the game is over or maximum turns have been reached
             if self.game_over or any(state.turn_count >= MAX_TURNS for state in self.agent_states.values()):
                 if not self.game_over:
                     print("\nMaximum turns reached! Game Over!")
                 break
             
-            # Start timing when we begin waiting for input
             input_start_time = time.time()
             user_input = None
             
-            # Keep checking for input until we get it or until AGENT_UPDATE_INTERVAL expires
+            # Wait for player input with a timeout equal to the update interval
             while (time.time() - input_start_time) < AGENT_UPDATE_INTERVAL:
                 if sys.platform == 'win32':
-                    # Windows implementation
                     import msvcrt
                     if msvcrt.kbhit():
                         user_input = input().strip()
                         break
                     time.sleep(0.1)
                 else:
-                    # Unix-like implementation
                     rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
                     if rlist:
                         user_input = input().strip()
                         break
             
-            # If we got user input, process it
             if user_input:
                 if user_input.lower() == 'quit':
                     break
@@ -436,37 +437,47 @@ class BankInvestigationGame:
                     continue
                 
                 if target in self.agents:
-                    # Process player message and update states
+                    # Process the player's message and update the target agent's state
                     self.process_player_message(target, message)
                     self.agent_states[target].turn_count += 1
                     
-                    # Send message to target agent
+                    # Send the message to the target agent
                     self.message_queue.send_message("player", target, message)
                     
-                    # Get immediate response from target agent first
+                    # Get immediate response from the target agent
                     result = self.agents[target].step()
                     if result and hasattr(result, 'feedback_message'):
                         print(f"\n{target.capitalize()}: {result.feedback_message}")
+                        if self.check_guilt_admission(result.feedback_message):
+                            print("\nCongratulations, you've uncovered the truth! The agents have admitted their guilt. You win!")
+                            self.game_over = True
+                            break
                     
-                    # Add delay before processing other agent
                     time.sleep(1)
                     
-                    # Get response from other agent
+                    # Process a response from the other agent
                     other_agent = "lina" if target == "lisa" else "lisa"
                     result = self.agents[other_agent].step()
                     if result and hasattr(result, 'feedback_message'):
                         print(f"\n{other_agent.capitalize()}: {result.feedback_message}")
+                        if self.check_guilt_admission(result.feedback_message):
+                            print("\nCongratulations, you've uncovered the truth! The agents have admitted their guilt. You win!")
+                            self.game_over = True
+                            break
                 else:
                     print("Unknown agent. Please specify 'lisa' or 'lina'.")
             else:
-                # If no user input received within interval, notify user
                 print("\nNo input received, continuing agent interactions...")
             
-            # If no user input or after processing input, do autonomous update
+            # After processing input, do an autonomous update for all agents
             for agent_id, agent in self.agents.items():
                 result = agent.step()
                 if result and hasattr(result, 'feedback_message'):
                     print(f"\n{agent_id.capitalize()} [Autonomous]: {result.feedback_message}")
+                    if self.check_guilt_admission(result.feedback_message):
+                        print("\nCongratulations, you've uncovered the truth! The agents have admitted their guilt. You win!")
+                        self.game_over = True
+                        break
                     time.sleep(0.5)
             
             print("\nWaiting for your input...")
