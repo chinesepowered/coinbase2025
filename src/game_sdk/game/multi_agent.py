@@ -12,21 +12,23 @@ from game_sdk.game.custom_types import Function, Argument, FunctionResult, Funct
 # Environment variables and configuration
 GAME_API_KEY = os.environ.get("GAME_API_KEY", "apt-ac543a81f4989a38ad474bdb4b1a442f")
 AGENT_UPDATE_INTERVAL = 15  # Seconds between autonomous agent updates
+MAX_TURNS = 20  # Maximum number of turns before game ends
 
 @dataclass
 class AgentState:
     """Tracks the internal state of an agent"""
     suspicion_level: int = 0  # 0-10
-    connection_level: int = 0  # 0-10
+    attraction_level: int = 0  # 0-10 (replaces connection_level)
     last_messages: List[str] = None  # Recent message history
     knowledge: Dict[str, any] = None  # What the agent knows
+    turn_count: int = 0  # Track number of interactions
     
     def __post_init__(self):
         self.last_messages = []
         self.knowledge = {
             "player_interactions": [],  # Track what player has said
             "other_agent_interactions": [],  # Track what other agent has shared
-            "revealed_info": [],  # Changed from set() to [] for JSON serialization
+            "revealed_info": [],  # Track what information has been revealed
         }
 
 class MessageQueue:
@@ -61,15 +63,10 @@ def share_information(target: str, info_type: str, **kwargs) -> tuple:
     return (FunctionResultStatus.DONE, f"Shared {info_type} information with {target}",
             {"target": target, "info_type": info_type})
 
-def deflect_suspicion(target: str, **kwargs) -> tuple:
-    """Function for agents to attempt to redirect suspicion to others"""
-    return (FunctionResultStatus.DONE, f"Attempted to deflect suspicion to {target}",
-            {"target": target})
-
-def express_emotion(emotion: str, intensity: int, **kwargs) -> tuple:
-    """Function for agents to express emotions in responses"""
-    return (FunctionResultStatus.DONE, f"Expressed {emotion} with intensity {intensity}",
-            {"emotion": emotion, "intensity": intensity})
+def like_player(**kwargs) -> tuple:
+    """Function for agents to increase their attraction to the player"""
+    return (FunctionResultStatus.DONE, "Increased attraction to player",
+            {"attraction_increase": True})
 
 # Define agent functions
 message_fn = Function(
@@ -92,23 +89,11 @@ share_info_fn = Function(
     executable=share_information
 )
 
-deflect_fn = Function(
-    fn_name="deflect_suspicion",
-    fn_description="Attempt to redirect suspicion to another person",
-    args=[
-        Argument(name="target", type="str", description="Person to deflect suspicion to")
-    ],
-    executable=deflect_suspicion
-)
-
-emotion_fn = Function(
-    fn_name="express_emotion",
-    fn_description="Express an emotion in response",
-    args=[
-        Argument(name="emotion", type="str", description="Emotion to express"),
-        Argument(name="intensity", type="int", description="Intensity level (1-10)")
-    ],
-    executable=express_emotion
+like_fn = Function(
+    fn_name="like_player",
+    fn_description="Increase attraction level towards the player",
+    args=[],
+    executable=like_player
 )
 
 class BankInvestigationGame:
@@ -120,6 +105,7 @@ class BankInvestigationGame:
         self.agent_states: Dict[str, AgentState] = {}
         self.running = False
         self.player_messages: List[str] = []
+        self.game_over = False
         
     def get_agent_state_fn(self, agent_id: str) -> Callable:
         """Creates state management function for each agent"""
@@ -129,11 +115,14 @@ class BankInvestigationGame:
                 if "message" in function_result.info:
                     self.agent_states[agent_id].last_messages.append(
                         function_result.info["message"])
+                if "attraction_increase" in function_result.info:
+                    self.agent_states[agent_id].attraction_level = min(
+                        10, self.agent_states[agent_id].attraction_level + 1)
                     
             # Return state visible to the agent
             return {
                 "suspicion_level": self.agent_states[agent_id].suspicion_level,
-                "connection_level": self.agent_states[agent_id].connection_level,
+                "attraction_level": self.agent_states[agent_id].attraction_level,
                 "recent_messages": self.agent_states[agent_id].last_messages[-5:],
                 "knowledge": self.agent_states[agent_id].knowledge
             }
@@ -142,7 +131,7 @@ class BankInvestigationGame:
     def setup_agents(self):
         """Initialize the game agents"""
         
-        # Initialize agent states first
+        # Initialize agent states
         self.agent_states = {
             "lisa": AgentState(),
             "lina": AgentState()
@@ -152,38 +141,38 @@ class BankInvestigationGame:
         self.message_queue.register_agent("lisa")
         self.message_queue.register_agent("lina")
         
-        # Create Lisa - The calculated deflector
+        # Create Lisa - The calculated player
         lisa_worker = WorkerConfig(
             id="lisa_worker",
-            worker_description="A calculating bank employee who aims to redirect suspicion",
+            worker_description="A calculating bank employee involved in embezzlement",
             get_state_fn=self.get_agent_state_fn("lisa"),
-            action_space=[message_fn, share_info_fn, deflect_fn, emotion_fn],
-            instruction="You are Lisa, a calculating person who will protect yourself by any means necessary. You helped embezzle money but want to appear innocent. Deflect suspicion to others when pressed."
+            action_space=[message_fn, share_info_fn, like_fn],
+            instruction="You are Lisa, a calculating person who will protect yourself by any means necessary. You helped embezzle money but want to appear innocent. You may reveal more if you become attracted to the player."
         )
         
         lisa = Agent(
             api_key=GAME_API_KEY,
             name="Lisa",
-            agent_goal="Avoid detection from player. Collaborate with Lina about investigation attempts. However, betray Lina if required to preserve self. Secretly attracted to Chinese men.",
-            agent_description="White woman. A strategic and manipulative individual who carefully manages appearances. Willing to betray others for own gain.",
+            agent_goal="Avoid detection from player. Collaborate with Lina about investigation attempts. However, betray Lina if required to preserve self. May reveal guilt if highly attracted to player.",
+            agent_description="White woman. A strategic and manipulative individual who carefully manages appearances. More likely to reveal information when attracted to someone.",
             get_agent_state_fn=self.get_agent_state_fn("lisa"),
             workers=[lisa_worker]
         )
         
-        # Create Lina - The conflicted accomplice
+        # Create Lina - The emotional agent
         lina_worker = WorkerConfig(
             id="lina_worker",
-            worker_description="A conflicted bank employee struggling with guilt",
+            worker_description="A bank employee struggling with guilt over embezzlement",
             get_state_fn=self.get_agent_state_fn("lina"),
-            action_space=[message_fn, share_info_fn, deflect_fn, emotion_fn],
-            instruction="You are Lina, who helped embezzle money but feels guilty. You want to appear innocent while maintaining your self-image as a good person. You may slip up if pressed about morality."
+            action_space=[message_fn, share_info_fn, like_fn],
+            instruction="You are Lina, who helped embezzle money but feels guilty. You want to appear innocent while maintaining your self-image as a good person. You may reveal more if you become attracted to the player."
         )
         
         lina = Agent(
             api_key=GAME_API_KEY,
             name="Lina",
-            agent_goal="Avoid detection from player. Collaborate with Lisa about investigation attempts. Secretly attracted to Chinese men.",
-            agent_description="Chinese woman who has a secret fetish for Chinese men. Can be foolish when it comes to emotions and men.",
+            agent_goal="Avoid detection from player. Collaborate with Lisa about investigation attempts. May reveal guilt if highly attracted to player.",
+            agent_description="Chinese woman who becomes more talkative when attracted to someone. More likely to reveal information when feeling a connection.",
             get_agent_state_fn=self.get_agent_state_fn("lina"),
             workers=[lina_worker]
         )
@@ -198,6 +187,20 @@ class BankInvestigationGame:
         for agent in self.agents.values():
             agent.compile()
 
+    def check_guilt_admission(self, message: str) -> bool:
+        """Check if a message contains an admission of guilt"""
+        guilt_phrases = {
+            "i did it",
+            "we took",
+            "i took",
+            "i helped",
+            "we embezzled",
+            "i embezzled",
+            "i'm guilty",
+            "we're guilty"
+        }
+        return any(phrase in message.lower() for phrase in guilt_phrases)
+
     def update_agent_state(self, agent_id: str, function_result: Optional[FunctionResult]):
         """Update agent state based on actions and interactions"""
         state = self.agent_states[agent_id]
@@ -207,6 +210,11 @@ class BankInvestigationGame:
             if "message" in function_result.info:
                 message = function_result.info["message"].lower()
                 
+                # Check for guilt admission
+                if self.check_guilt_admission(message):
+                    print(f"\n{agent_id.capitalize()} has admitted guilt! Game Over!")
+                    self.game_over = True
+                    
                 # Adjust suspicion based on defensive language
                 defensive_words = {"never", "absolutely not", "ridiculous", "how dare"}
                 if any(word in message for word in defensive_words):
@@ -214,16 +222,12 @@ class BankInvestigationGame:
                     
             # Update based on information sharing
             if "info_type" in function_result.info:
-                if function_result.info["info_type"] not in state.knowledge["revealed_info"]:  # Check if not already in list
+                if function_result.info["info_type"] not in state.knowledge["revealed_info"]:
                     state.knowledge["revealed_info"].append(function_result.info["info_type"])
-                
-            # Update based on deflection attempts
-            if "target" in function_result.info:
-                state.suspicion_level = min(10, state.suspicion_level + 2)
 
     def agent_thread_function(self, agent_id: str):
         """Background thread function for autonomous agent behavior"""
-        while self.running:
+        while self.running and not self.game_over:
             # Process any pending messages
             messages = self.message_queue.get_messages(agent_id)
             for from_id, message in messages:
@@ -232,28 +236,36 @@ class BankInvestigationGame:
                     (from_id, message))
                 
                 # Have agent process message
-                self.agents[agent_id].step()
+                result = self.agents[agent_id].step()
+                if result and hasattr(result, 'feedback_message'):
+                    print(f"\n{agent_id.capitalize()}: {result.feedback_message}")
                 
             # Periodic autonomous actions
             if random.random() < 0.3:  # 30% chance of autonomous action
-                # Choose an action based on agent state
-                if self.agent_states[agent_id].suspicion_level > 7:
-                    # High suspicion - try to deflect
-                    self.message_queue.send_message(
-                        agent_id, 
-                        "player",
-                        f"Have you looked into what {random.choice(['Mark', 'Sarah', 'John'])} has been doing?"
-                    )
-                elif agent_id == "lina" and random.random() < 0.2:
-                    # Lina occasionally shows guilt
-                    self.message_queue.send_message(
-                        agent_id,
-                        "lisa",
-                        "I'm not sure how much longer I can keep this up..."
-                    )
+                state = self.agent_states[agent_id]
+                
+                # Share information about player if suspicion is high
+                if state.suspicion_level > 7:
+                    other_agent = "lina" if agent_id == "lisa" else "lisa"
+                    message = "The player is asking too many questions. Be careful."
+                    self.message_queue.send_message(agent_id, other_agent, message)
+                    print(f"\n{agent_id.capitalize()} [to {other_agent.capitalize()}]: {message}")
+                
+                # Possibly reveal more if attraction is high
+                elif state.attraction_level > 8:
+                    guilty_messages = [
+                        "I've been feeling so guilty lately...",
+                        "I wish I could tell you everything...",
+                        "Sometimes I think about coming clean..."
+                    ]
+                    message = random.choice(guilty_messages)
+                    self.message_queue.send_message(agent_id, "player", message)
+                    print(f"\n{agent_id.capitalize()} [to player]: {message}")
                     
             # Update agent state
-            self.agents[agent_id].step()
+            result = self.agents[agent_id].step()
+            if result and hasattr(result, 'feedback_message'):
+                print(f"\n{agent_id.capitalize()}: {result.feedback_message}")
             
             time.sleep(AGENT_UPDATE_INTERVAL)
 
@@ -280,6 +292,11 @@ class BankInvestigationGame:
         print("Type 'quit' to exit.")
         
         while True:
+            if self.game_over or any(state.turn_count >= MAX_TURNS for state in self.agent_states.values()):
+                if not self.game_over:
+                    print("\nMaximum turns reached! Game Over!")
+                break
+                
             user_input = input("> ").strip()
             
             if user_input.lower() == 'quit':
@@ -290,8 +307,9 @@ class BankInvestigationGame:
                 target = target.lower()
                 
                 if target in self.agents:
-                    # Record player message
+                    # Record player message and increment turn count
                     self.player_messages.append((target, message))
+                    self.agent_states[target].turn_count += 1
                     
                     # Update agent state
                     self.agent_states[target].knowledge["player_interactions"].append(message)
