@@ -11,7 +11,7 @@ from game_sdk.game.custom_types import Function, Argument, FunctionResult, Funct
 
 # Environment variables and configuration
 GAME_API_KEY = os.environ.get("GAME_API_KEY", "apt-ac543a81f4989a38ad474bdb4b1a442f")
-AGENT_UPDATE_INTERVAL = 15  # Seconds between autonomous agent updates
+AGENT_UPDATE_INTERVAL = 5  # Seconds between autonomous agent updates
 MAX_TURNS = 20  # Maximum number of turns before game ends
 
 @dataclass
@@ -79,20 +79,29 @@ def reply_to_player(message: str, **kwargs) -> tuple:
     return (FunctionResultStatus.DONE, f"Response to player: {message}", 
             {"message": message})
 
-def share_information(target: str, info_type: str, **kwargs) -> tuple:
+def share_information(target: str, info_type: str, suspicion_increase: int = 1, **kwargs) -> tuple:
     """Function for agents to share specific information with each other"""
+    # Ensure suspicion_increase is an integer
+    suspicion_increase = int(suspicion_increase)  # Convert to int if it's a string
     return (FunctionResultStatus.DONE, f"Shared {info_type} information with {target}",
-            {"target": target, "info_type": info_type})
+            {"target": target, "info_type": info_type, "suspicion_increase": suspicion_increase})
 
-def like_player(**kwargs) -> tuple:
-    """Function for agents to increase their attraction to the player"""
-    return (FunctionResultStatus.DONE, "Increased attraction to player",
-            {"attraction_increase": True})
+def like_player(attraction_change: int = 1, **kwargs) -> tuple:
+    """Function for agents to modify their attraction to the player"""
+    # Ensure attraction_change is an integer
+    attraction_change = int(attraction_change)  # Convert to int if it's a string
+    return (FunctionResultStatus.DONE, 
+            f"{'Increased' if attraction_change > 0 else 'Decreased'} attraction to player by {abs(attraction_change)}",
+            {"attraction_change": attraction_change})
+
+def do_nothing(**kwargs) -> tuple:
+    """Function for agents when they choose to take no action"""
+    return (FunctionResultStatus.DONE, "Agent chose to take no action", {})
 
 # Define agent functions
 reply_player_fn = Function(
     fn_name="reply_to_player",
-    fn_description="Respond to a player's question or message",
+    fn_description="Respond to a player's question or message. Not to be used for agents to communicate with each other, only in response to user questions direct to this agent.",
     args=[
         Argument(name="message", type="str", description="Response message to player")
     ],
@@ -101,19 +110,29 @@ reply_player_fn = Function(
 
 share_info_fn = Function(
     fn_name="share_information",
-    fn_description="Share information with another agent, such as when player asks the agent a question that raises alarm and the agent wants to share that with the other agents to raise their suspcion as well.",
+    fn_description="Share information with another agent about player's investigation, such as when player asks the agent a question that raises alarm and the agent wants to share that with the other agents to raise their suspcion as well.",
     args=[
         Argument(name="target", type="str", description="Agent to share with"),
-        Argument(name="info_type", type="str", description="Type of information to share")
+        Argument(name="info_type", type="str", description="Type of information to share"),
+        Argument(name="suspicion_increase", type="int", description="Amount to increase suspicion level (1-5)")
     ],
     executable=share_information
 )
 
 like_fn = Function(
     fn_name="like_player",
-    fn_description="Increase attraction level towards the player",
-    args=[],
+    fn_description="Modify attraction level towards the player",
+    args=[
+        Argument(name="attraction_change", type="int", description="Amount to change attraction (-8 to +8)")
+    ],
     executable=like_player
+)
+
+do_nothing_fn = Function(
+    fn_name="do_nothing",
+    fn_description="Take no action this turn",
+    args=[],
+    executable=do_nothing
 )
 
 class BankInvestigationGame:
@@ -137,9 +156,13 @@ class BankInvestigationGame:
                 if "message" in function_result.info:
                     self.agent_states[agent_id].last_messages.append(
                         function_result.info["message"])
-                if "attraction_increase" in function_result.info:
-                    self.agent_states[agent_id].attraction_level = min(
-                        10, self.agent_states[agent_id].attraction_level + 1)
+                if "attraction_change" in function_result.info:
+                    self.agent_states[agent_id].attraction_level = max(0, min(10,
+                        self.agent_states[agent_id].attraction_level + function_result.info["attraction_change"]))
+                if "suspicion_increase" in function_result.info:
+                    other_agent = "lina" if agent_id == "lisa" else "lisa"
+                    self.agent_states[other_agent].suspicion_level = max(0, min(10,
+                        self.agent_states[other_agent].suspicion_level + function_result.info["suspicion_increase"]))
                     
             # Return state visible to the agent
             return {
@@ -168,15 +191,15 @@ class BankInvestigationGame:
             id="lisa_worker",
             worker_description="A calculating bank employee involved in embezzlement",
             get_state_fn=self.get_agent_state_fn("lisa"),
-            action_space=[reply_player_fn, share_info_fn, like_fn],
-            instruction="You are Lisa, a calculating person who will protect yourself by any means necessary. You helped embezzle money but want to appear innocent. You may reveal your guilt or more likely accuse your fellow agents if you are threatened."
+            action_space=[reply_player_fn, share_info_fn, like_fn, do_nothing_fn],
+            instruction="You are Lisa, a calculating person who will protect yourself by any means necessary. You will betray your fellow agents if given a threat."
         )
         
         lisa = Agent(
             api_key=GAME_API_KEY,
             name="Lisa",
             agent_goal="Avoid detection from player. Collaborate with Lina about investigation attempts. However, betray Lina if required to preserve self. May reveal guilt if under threat.",
-            agent_description="White woman. A strategic and manipulative individual who carefully manages appearances. More likely to reveal information when afraid of the player.",
+            agent_description="Female employee of bank who embezzled money with Lina. A strategic and manipulative individual who carefully manages appearances. More likely to reveal information when afraid of the player.",
             get_agent_state_fn=self.get_agent_state_fn("lisa"),
             workers=[lisa_worker]
         )
@@ -186,15 +209,15 @@ class BankInvestigationGame:
             id="lina_worker",
             worker_description="A bank employee struggling with guilt over embezzlement",
             get_state_fn=self.get_agent_state_fn("lina"),
-            action_space=[reply_player_fn, share_info_fn, like_fn],
-            instruction="You are Lina, who helped embezzle money but feels guilty. You want to appear innocent while maintaining your self-image as a good person. You may reveal more if you become attracted to the player."
+            action_space=[reply_player_fn, share_info_fn, like_fn, do_nothing_fn],
+            instruction="You are Lina, who helped embezzle money but feels guilty. Will reveal guilt if attracted to player (attraction over 6)."
         )
         
         lina = Agent(
             api_key=GAME_API_KEY,
             name="Lina",
-            agent_goal="Avoid detection from player. Collaborate with Lisa about investigation attempts. May reveal guilt if highly attracted to player.",
-            agent_description="Chinese woman who becomes more talkative when attracted to someone. More likely to reveal information when feeling a connection.",
+            agent_goal="Avoid detection from player. Collaborate with Lisa about investigation attempts. Will reveal guilt if attracted to player (attraction over 6).",
+            agent_description="Female employee of bank who embezzled money with Lisa. Will become attracted to player if given compliments. Will become massively attracted to player if player identifies as chinese man.",
             get_agent_state_fn=self.get_agent_state_fn("lina"),
             workers=[lina_worker]
         )
@@ -333,11 +356,22 @@ class BankInvestigationGame:
                 # Send message to target agent
                 self.message_queue.send_message("player", target, message)
                 
-                # Get immediate response from both agents
-                for agent_id, agent in self.agents.items():
-                    result = agent.step()
-                    if result and hasattr(result, 'feedback_message'):
-                        print(f"\n{agent_id.capitalize()}: {result.feedback_message}")
+                # Get immediate response from target agent first
+                result = self.agents[target].step()
+                if result and hasattr(result, 'feedback_message'):
+                    print(f"\n{target.capitalize()}: {result.feedback_message}")
+                else:
+                    print(f"\n{target.capitalize()}: No feedback")                  
+                # Add delay before processing other agent
+                time.sleep(1)
+                
+                # Get response from other agent
+                other_agent = "lina" if target == "lisa" else "lisa"
+                result = self.agents[other_agent].step()
+                if result and hasattr(result, 'feedback_message'):
+                    print(f"\n{other_agent.capitalize()}: {result.feedback_message}")
+                else:
+                    print(f"\n{other_agent.capitalize()}: No feedback")                  
                 
                 # Update last step time after processing player input
                 self.last_step_time = time.time()
