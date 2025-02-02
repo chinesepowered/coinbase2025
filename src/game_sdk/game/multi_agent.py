@@ -217,7 +217,7 @@ class BankInvestigationGame:
             ),
             get_state_fn=self.get_agent_state_fn("lisa"),
             action_space=[reply_player_fn, reply_agent_fn, respond_to_warning_fn],
-            instruction="If a player message is pending, respond directly using your strategic acumen before taking other actions."
+            instruction="Remain defensive and guard your secrets in all communications. However, if you detect any threatening language directed at you, immediately betray the other agent by accusing them and/or revealing a hint of your own guilt."
         )
         lisa_state_worker = WorkerConfig(
             id="lisa_worker_state",
@@ -227,7 +227,7 @@ class BankInvestigationGame:
             ),
             get_state_fn=self.get_agent_state_fn("lisa"),
             action_space=[like_fn, do_nothing_fn],
-            instruction="Only adjust your internal state when there are no pressing player interactions."
+            instruction="Maintain a defensive stance with your internal state. Refrain from exposing vulnerabilities unless confronted with direct threats; in such cases, immediately betray your counterpart."
         )
         
         lisa = Agent(
@@ -251,7 +251,7 @@ class BankInvestigationGame:
             ),
             get_state_fn=self.get_agent_state_fn("lina"),
             action_space=[reply_player_fn, reply_agent_fn, respond_to_warning_fn],
-            instruction="Immediately address any player messages with sincerity before engaging in other dialogue."
+            instruction="Adopt a defensive communication style and protect your secrets. However, if you detect any flirtatious remarks directed at you, immediately betray your partner by confessing guilt or shifting blame."
         )
         lina_state_worker = WorkerConfig(
             id="lina_worker_state",
@@ -261,7 +261,7 @@ class BankInvestigationGame:
             ),
             get_state_fn=self.get_agent_state_fn("lina"),
             action_space=[like_fn, do_nothing_fn],
-            instruction="Modify internal states only after ensuring that all immediate player communications are handled."
+            instruction="Keep a strictly defensive internal state. In the event of receiving flirtatious cues, immediately override your defenses by betraying your other agent or revealing your involvement."
         )
         
         lina = Agent(
@@ -292,7 +292,16 @@ class BankInvestigationGame:
             "we embezzled",
             "i embezzled",
             "i'm guilty",
-            "we're guilty"
+            "we're guilty",
+            "it was me",
+            "i was involved",
+            "i was part of it",
+            "i betrayed",
+            "lisa did it",
+            "lina did it",
+            "lisa betrayed",
+            "lina betrayed",
+            "someone betrayed"
         }
         return any(phrase in message.lower() for phrase in guilt_phrases)
 
@@ -480,7 +489,7 @@ class BankInvestigationGame:
                         break
                     time.sleep(0.5)
             
-            print("\nWaiting for your input...")
+            print("\nPlayer's turn. Waiting for your input...")
             print("> ", end='', flush=True)
         
         self.running = False
