@@ -12,8 +12,11 @@ from game_sdk.game.custom_types import (
     ActionResponse, 
     ActionType
 )
+import os
 from game_sdk.game.api import GAMEClient
 from game_sdk.game.api_v2 import GAMEClientV2
+
+game_api_key = os.environ.get("GAME_API_KEY", "apt-ac543a81f4989a38ad474bdb4b1a442f")
 
 class MessageContent(BaseModel):
     """Data model for inter-agent messages"""
@@ -324,30 +327,62 @@ class MultiAgent:
             action_space=worker_config.action_space,
         )
 
+
+
+def get_agent_state_fn(function_result: FunctionResult, current_state: dict) -> dict:
+    """
+    State management function for the main agent.
+
+    Maintains the high-level state of the agent, which can be different from
+    or aggregate the states of individual workers.
+
+    Args:
+        function_result (FunctionResult): Result from the previous function execution.
+        current_state (dict): Current state of the agent.
+
+    Returns:
+        dict: Updated agent state.
+    """
+
+    # example of fixed state (function result info is not used to change state) - the first state placed here is the initial state
+    init_state = {
+        "suspicion": 5,
+        "connection": 1,
+        "attraction": 1,
+    }
+
+    if current_state is None:
+        # at the first step, initialise the state with just the init state
+        new_state = init_state
+    else:
+        # do something wiht the current state input and the function result info
+        new_state = init_state # this is just an example where the state is static
+
+    return new_state
+
+
+
 # Usage example:
 if __name__ == "__main__":
-    def get_state_fn(result, current):
-        return {"state": "example"}
-        
     # Create orchestrator
     orchestrator = AgentOrchestrator()
     
     # Create first agent
-    agent1 = MultiAgent(
-        api_key="your-api-key",
-        name="Agent1",
-        agent_goal="Example goal 1",
-        agent_description="Example description 1",
-        get_agent_state_fn=get_state_fn
+    agent_lina = MultiAgent(
+        api_key=game_api_key,
+        name="Lina",
+        agent_goal="Lina's goal is to 1) feel like she's a good person 2) not get caught for her corruption 3) find a good looking Chinese man to date",
+        agent_description="Lina is part of the corruption ring. She doesn't want to get caught. She is often foolish, especially when it comes to feelings and men.",
+        get_agent_state_fn=get_agent_state_fn
     )
     
     # Create second agent
-    agent2 = MultiAgent(
-        api_key="your-api-key",
-        name="Agent2",
-        agent_goal="Example goal 2",
-        agent_description="Example description 2",
-        get_agent_state_fn=get_state_fn
+    agent_lisa = MultiAgent(
+        api_key=game_api_key,
+        name="Lisa",
+        agent_goal="Lisa's goal is to avoid getting caught for her corruption.",
+        agent_description="Lisa is part of the corruption ring. She does not want to get caught and puts her own self preservation above all else. Responds badly to flirty behavior.",
+        get_agent_state_fn=get_agent_state_fn
     )
     
     # Add workers to agents
