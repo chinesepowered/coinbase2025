@@ -11,7 +11,7 @@ from game_sdk.game.custom_types import Function, Argument, FunctionResult, Funct
 
 # Environment variables and configuration
 GAME_API_KEY = os.environ.get("GAME_API_KEY", "apt-ac543a81f4989a38ad474bdb4b1a442f")
-AGENT_UPDATE_INTERVAL = 5  # Seconds between autonomous agent updates
+AGENT_UPDATE_INTERVAL = 6  # Seconds between autonomous agent updates
 MAX_TURNS = 20  # Maximum number of turns before game ends
 
 @dataclass
@@ -146,6 +146,7 @@ class BankInvestigationGame:
         self.player_messages: List[str] = []
         self.game_over = False
         self.last_step_time = 0  # Track when the last autonomous step occurred
+        self.last_autonomous_time = 0  # Separate timer for autonomous updates
         self.autonomous_thread = None  # Thread for autonomous updates
         
     def get_agent_state_fn(self, agent_id: str) -> Callable:
@@ -303,7 +304,7 @@ class BankInvestigationGame:
         """Run autonomous updates for agents sequentially at regular intervals"""
         while self.running and not self.game_over:
             current_time = time.time()
-            if current_time - self.last_step_time >= AGENT_UPDATE_INTERVAL:
+            if current_time - self.last_autonomous_time >= AGENT_UPDATE_INTERVAL:
                 # Process agents sequentially
                 for agent_id, agent in self.agents.items():
                     result = agent.step()
@@ -311,76 +312,103 @@ class BankInvestigationGame:
                         print(f"\n{agent_id.capitalize()} [Autonomous]: {result.feedback_message}")
                         # Add a small delay between agent steps
                         time.sleep(0.5)
-                self.last_step_time = current_time
+                self.last_autonomous_time = current_time
             time.sleep(1)  # Check every second
 
     def start(self):
         """Start the game and agent threads"""
+        import select
+        import sys
+        
         self.running = True
         self.setup_agents()
-        self.last_step_time = time.time()
+        self.last_autonomous_time = time.time()  # Initialize autonomous timer
         
-        # Start autonomous update thread
-        self.autonomous_thread = threading.Thread(target=self.autonomous_update)
-        self.autonomous_thread.daemon = True
-        self.autonomous_thread.start()
-        
-        print("Welcome to the Bank Investigation Game!")
+        print("\nWelcome to the Bank Investigation Game!")
         print("You are investigating potential embezzlement at the bank.")
         print("You can talk to Lisa or Lina by typing their name followed by your message.")
         print("Example: 'lisa Hello' or 'lina What do you know about the missing money?'")
-        print("Type 'quit' to exit.")
+        print("Type 'quit' to exit.\n")
+        print("Waiting for your input...")
+        print("> ", end='', flush=True)
         
         while True:
             if self.game_over or any(state.turn_count >= MAX_TURNS for state in self.agent_states.values()):
                 if not self.game_over:
                     print("\nMaximum turns reached! Game Over!")
                 break
-                
-            user_input = input("> ").strip()
             
-            if user_input.lower() == 'quit':
-                break
-                
-            target, message = self.parse_player_input(user_input)
+            # Start timing when we begin waiting for input
+            input_start_time = time.time()
+            user_input = None
             
-            if target is None or message is None:
-                print("Please use format: <agent_name> <message>")
-                continue
-                
-            if target in self.agents:
-                # Process player message and update states
-                self.process_player_message(target, message)
-                self.agent_states[target].turn_count += 1
-                
-                # Send message to target agent
-                self.message_queue.send_message("player", target, message)
-                
-                # Get immediate response from target agent first
-                result = self.agents[target].step()
-                if result and hasattr(result, 'feedback_message'):
-                    print(f"\n{target.capitalize()}: {result.feedback_message}")
+            # Keep checking for input until we get it or until AGENT_UPDATE_INTERVAL expires
+            while (time.time() - input_start_time) < AGENT_UPDATE_INTERVAL:
+                if sys.platform == 'win32':
+                    # Windows implementation
+                    import msvcrt
+                    if msvcrt.kbhit():
+                        user_input = input().strip()
+                        break
+                    time.sleep(0.1)
                 else:
-                    print(f"\n{target.capitalize()}: No feedback")                  
-                # Add delay before processing other agent
-                time.sleep(1)
+                    # Unix-like implementation
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+                    if rlist:
+                        user_input = input().strip()
+                        break
+            
+            # If we got user input, process it
+            if user_input:
+                if user_input.lower() == 'quit':
+                    break
                 
-                # Get response from other agent
-                other_agent = "lina" if target == "lisa" else "lisa"
-                result = self.agents[other_agent].step()
-                if result and hasattr(result, 'feedback_message'):
-                    print(f"\n{other_agent.capitalize()}: {result.feedback_message}")
+                target, message = self.parse_player_input(user_input)
+                
+                if target is None or message is None:
+                    print("Please use format: <agent_name> <message>")
+                    print("\nWaiting for your input...")
+                    print("> ", end='', flush=True)
+                    continue
+                
+                if target in self.agents:
+                    # Process player message and update states
+                    self.process_player_message(target, message)
+                    self.agent_states[target].turn_count += 1
+                    
+                    # Send message to target agent
+                    self.message_queue.send_message("player", target, message)
+                    
+                    # Get immediate response from target agent first
+                    result = self.agents[target].step()
+                    if result and hasattr(result, 'feedback_message'):
+                        print(f"\n{target.capitalize()}: {result.feedback_message}")
+                    
+                    # Add delay before processing other agent
+                    time.sleep(1)
+                    
+                    # Get response from other agent
+                    other_agent = "lina" if target == "lisa" else "lisa"
+                    result = self.agents[other_agent].step()
+                    if result and hasattr(result, 'feedback_message'):
+                        print(f"\n{other_agent.capitalize()}: {result.feedback_message}")
                 else:
-                    print(f"\n{other_agent.capitalize()}: No feedback")                  
-                
-                # Update last step time after processing player input
-                self.last_step_time = time.time()
+                    print("Unknown agent. Please specify 'lisa' or 'lina'.")
             else:
-                print("Unknown agent. Please specify 'lisa' or 'lina'.")
+                # If no user input received within interval, notify user
+                print("\nNo input received, continuing agent interactions...")
+            
+            # If no user input or after processing input, do autonomous update
+            for agent_id, agent in self.agents.items():
+                result = agent.step()
+                if result and hasattr(result, 'feedback_message'):
+                    print(f"\n{agent_id.capitalize()} [Autonomous]: {result.feedback_message}")
+                    time.sleep(0.5)
+            
+            print("\nWaiting for your input...")
+            print("> ", end='', flush=True)
         
         self.running = False
-        if self.autonomous_thread:
-            self.autonomous_thread.join(timeout=1)
 
 if __name__ == "__main__":
     game = BankInvestigationGame()

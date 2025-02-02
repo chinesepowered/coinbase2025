@@ -1,5 +1,6 @@
 import requests
 from typing import List
+import time
 
 from typing import List, Dict
 
@@ -105,16 +106,33 @@ class GAMEClientV2:
         """
         API call to get agent actions/next step (for agent)
         """
-        response = requests.post(
-            f"{self.base_url}/agents/{agent_id}/actions",
-            headers=self.headers,
-            json={
-                "data": data
-            }
-        )
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    f"{self.base_url}/agents/{agent_id}/actions",
+                    headers=self.headers,
+                    json={
+                        "data": data
+                    }
+                )
 
-        response_json = response.json()
-        if response.status_code != 200:
-            raise ValueError(f"Failed to post data: {response_json}")
+                response_json = response.json()
+                if response.status_code != 200:
+                    if "Concurrent request detected" in str(response_json):
+                        if attempt < max_retries - 1:  # Don't sleep on last attempt
+                            time.sleep(retry_delay)
+                            continue
+                    raise ValueError(f"Failed to post data: {response_json}")
 
-        return response_json["data"]
+                return response_json["data"]
+                
+            except Exception as e:
+                if attempt < max_retries - 1:  # Don't sleep on last attempt
+                    time.sleep(retry_delay)
+                    continue
+                raise e
+
+        return {"action": {"type": "do_nothing"}}  # Fallback response if all retries fail
