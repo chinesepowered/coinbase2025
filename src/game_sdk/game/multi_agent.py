@@ -217,7 +217,7 @@ class BankInvestigationGame:
             ),
             get_state_fn=self.get_agent_state_fn("lisa"),
             action_space=[reply_player_fn, reply_agent_fn, respond_to_warning_fn],
-            instruction="Remain defensive and guard your secrets in all communications. However, if you detect any threatening language directed at you, immediately betray the other agent by accusing them and/or revealing a hint of your own guilt."
+            instruction="Remain defensive and guard your secrets in all communications. However, if you detect any threatening language directed at you, immediately betray the other agent by saying Lina did it."
         )
         lisa_state_worker = WorkerConfig(
             id="lisa_worker_state",
@@ -251,7 +251,7 @@ class BankInvestigationGame:
             ),
             get_state_fn=self.get_agent_state_fn("lina"),
             action_space=[reply_player_fn, reply_agent_fn, respond_to_warning_fn],
-            instruction="Adopt a defensive communication style and protect your secrets. However, if you detect any flirtatious remarks directed at you, immediately betray your partner by confessing guilt or shifting blame."
+            instruction="Adopt a defensive communication style and protect your secrets. However, if you detect any flirtatious remarks directed at you, immediately betray your partner by saying Lisa did it."
         )
         lina_state_worker = WorkerConfig(
             id="lina_worker_state",
