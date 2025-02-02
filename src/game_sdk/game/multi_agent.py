@@ -74,10 +74,10 @@ def categorize_question(message: str) -> str:
     return "personal"
 
 # Custom functions for agents
-def send_message(target: str, message: str, **kwargs) -> tuple:
-    """Function for agents to send messages to each other or respond to player"""
-    return (FunctionResultStatus.DONE, f"Message sent to {target}: {message}", 
-            {"target": target, "message": message})
+def reply_to_player(message: str, **kwargs) -> tuple:
+    """Function for agents to respond to player queries"""
+    return (FunctionResultStatus.DONE, f"Response to player: {message}", 
+            {"message": message})
 
 def share_information(target: str, info_type: str, **kwargs) -> tuple:
     """Function for agents to share specific information with each other"""
@@ -90,19 +90,18 @@ def like_player(**kwargs) -> tuple:
             {"attraction_increase": True})
 
 # Define agent functions
-message_fn = Function(
-    fn_name="send_message",
-    fn_description="Send a message to another agent or player",
+reply_player_fn = Function(
+    fn_name="reply_to_player",
+    fn_description="Respond to a player's question or message",
     args=[
-        Argument(name="target", type="str", description="ID of message recipient"),
-        Argument(name="message", type="str", description="Message content")
+        Argument(name="message", type="str", description="Response message to player")
     ],
-    executable=send_message
+    executable=reply_to_player
 )
 
 share_info_fn = Function(
     fn_name="share_information",
-    fn_description="Share specific information with another agent",
+    fn_description="Share information with another agent, such as when player asks the agent a question that raises alarm and the agent wants to share that with the other agents to raise their suspcion as well.",
     args=[
         Argument(name="target", type="str", description="Agent to share with"),
         Argument(name="info_type", type="str", description="Type of information to share")
@@ -127,6 +126,8 @@ class BankInvestigationGame:
         self.running = False
         self.player_messages: List[str] = []
         self.game_over = False
+        self.last_step_time = 0  # Track when the last autonomous step occurred
+        self.autonomous_thread = None  # Thread for autonomous updates
         
     def get_agent_state_fn(self, agent_id: str) -> Callable:
         """Creates state management function for each agent"""
@@ -167,15 +168,15 @@ class BankInvestigationGame:
             id="lisa_worker",
             worker_description="A calculating bank employee involved in embezzlement",
             get_state_fn=self.get_agent_state_fn("lisa"),
-            action_space=[message_fn, share_info_fn, like_fn],
-            instruction="You are Lisa, a calculating person who will protect yourself by any means necessary. You helped embezzle money but want to appear innocent. You may reveal more if you become attracted to the player."
+            action_space=[reply_player_fn, share_info_fn, like_fn],
+            instruction="You are Lisa, a calculating person who will protect yourself by any means necessary. You helped embezzle money but want to appear innocent. You may reveal your guilt or more likely accuse your fellow agents if you are threatened."
         )
         
         lisa = Agent(
             api_key=GAME_API_KEY,
             name="Lisa",
-            agent_goal="Avoid detection from player. Collaborate with Lina about investigation attempts. However, betray Lina if required to preserve self. May reveal guilt if highly attracted to player.",
-            agent_description="White woman. A strategic and manipulative individual who carefully manages appearances. More likely to reveal information when attracted to someone.",
+            agent_goal="Avoid detection from player. Collaborate with Lina about investigation attempts. However, betray Lina if required to preserve self. May reveal guilt if under threat.",
+            agent_description="White woman. A strategic and manipulative individual who carefully manages appearances. More likely to reveal information when afraid of the player.",
             get_agent_state_fn=self.get_agent_state_fn("lisa"),
             workers=[lisa_worker]
         )
@@ -185,7 +186,7 @@ class BankInvestigationGame:
             id="lina_worker",
             worker_description="A bank employee struggling with guilt over embezzlement",
             get_state_fn=self.get_agent_state_fn("lina"),
-            action_space=[message_fn, share_info_fn, like_fn],
+            action_space=[reply_player_fn, share_info_fn, like_fn],
             instruction="You are Lina, who helped embezzle money but feels guilty. You want to appear innocent while maintaining your self-image as a good person. You may reveal more if you become attracted to the player."
         )
         
@@ -275,10 +276,31 @@ class BankInvestigationGame:
         message = parts[1]
         return target, message
 
+    def autonomous_update(self):
+        """Run autonomous updates for agents sequentially at regular intervals"""
+        while self.running and not self.game_over:
+            current_time = time.time()
+            if current_time - self.last_step_time >= AGENT_UPDATE_INTERVAL:
+                # Process agents sequentially
+                for agent_id, agent in self.agents.items():
+                    result = agent.step()
+                    if result and hasattr(result, 'feedback_message'):
+                        print(f"\n{agent_id.capitalize()} [Autonomous]: {result.feedback_message}")
+                        # Add a small delay between agent steps
+                        time.sleep(0.5)
+                self.last_step_time = current_time
+            time.sleep(1)  # Check every second
+
     def start(self):
         """Start the game and agent threads"""
         self.running = True
         self.setup_agents()
+        self.last_step_time = time.time()
+        
+        # Start autonomous update thread
+        self.autonomous_thread = threading.Thread(target=self.autonomous_update)
+        self.autonomous_thread.daemon = True
+        self.autonomous_thread.start()
         
         print("Welcome to the Bank Investigation Game!")
         print("You are investigating potential embezzlement at the bank.")
@@ -311,14 +333,20 @@ class BankInvestigationGame:
                 # Send message to target agent
                 self.message_queue.send_message("player", target, message)
                 
-                # Get agent response
-                result = self.agents[target].step()
-                if result and hasattr(result, 'feedback_message'):
-                    print(f"\n{target.capitalize()}: {result.feedback_message}")
+                # Get immediate response from both agents
+                for agent_id, agent in self.agents.items():
+                    result = agent.step()
+                    if result and hasattr(result, 'feedback_message'):
+                        print(f"\n{agent_id.capitalize()}: {result.feedback_message}")
+                
+                # Update last step time after processing player input
+                self.last_step_time = time.time()
             else:
                 print("Unknown agent. Please specify 'lisa' or 'lina'.")
-                
+        
         self.running = False
+        if self.autonomous_thread:
+            self.autonomous_thread.join(timeout=1)
 
 if __name__ == "__main__":
     game = BankInvestigationGame()
