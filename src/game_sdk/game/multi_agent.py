@@ -18,10 +18,11 @@ MAX_TURNS = 20  # Maximum number of turns before game ends
 class AgentState:
     """Tracks the internal state of an agent"""
     suspicion_level: int = 0  # 0-10
-    attraction_level: int = 0  # 0-10 (replaces connection_level)
+    attraction_level: int = 0  # 0-10
     last_messages: List[str] = None  # Recent message history
     knowledge: Dict[str, any] = None  # What the agent knows
     turn_count: int = 0  # Track number of interactions
+    player_questions: Dict[str, List[str]] = None  # Track what player has asked about specific topics
     
     def __post_init__(self):
         self.last_messages = []
@@ -30,20 +31,29 @@ class AgentState:
             "other_agent_interactions": [],  # Track what other agent has shared
             "revealed_info": [],  # Track what information has been revealed
         }
+        self.player_questions = {
+            "money": [],
+            "embezzlement": [],
+            "investigation": [],
+            "personal": []
+        }
 
 class MessageQueue:
     """Handles message passing between agents and from player"""
     def __init__(self):
         self.queues: Dict[str, queue.Queue] = {}
+        self.message_history: Dict[str, List[tuple]] = {}  # Track message history per agent
         
     def register_agent(self, agent_id: str):
         """Register a new agent's message queue"""
         self.queues[agent_id] = queue.Queue()
+        self.message_history[agent_id] = []
         
     def send_message(self, from_id: str, to_id: str, message: str):
         """Send a message from one agent to another"""
         if to_id in self.queues:
             self.queues[to_id].put((from_id, message))
+            self.message_history[to_id].append((from_id, message, datetime.now()))
             
     def get_messages(self, agent_id: str) -> List[tuple]:
         """Get all pending messages for an agent"""
@@ -51,6 +61,17 @@ class MessageQueue:
         while not self.queues[agent_id].empty():
             messages.append(self.queues[agent_id].get())
         return messages
+
+def categorize_question(message: str) -> str:
+    """Categorize the type of question asked by the player"""
+    message = message.lower()
+    if any(word in message for word in ["money", "funds", "account", "transaction"]):
+        return "money"
+    elif any(word in message for word in ["embezzle", "steal", "fraud", "crime"]):
+        return "embezzlement"
+    elif any(word in message for word in ["investigate", "suspect", "evidence", "proof"]):
+        return "investigation"
+    return "personal"
 
 # Custom functions for agents
 def send_message(target: str, message: str, **kwargs) -> tuple:
@@ -201,90 +222,64 @@ class BankInvestigationGame:
         }
         return any(phrase in message.lower() for phrase in guilt_phrases)
 
-    def update_agent_state(self, agent_id: str, function_result: Optional[FunctionResult]):
-        """Update agent state based on actions and interactions"""
+    def should_inform_other_agent(self, agent_id: str, question_type: str) -> bool:
+        """Determine if an agent should inform the other about a player question"""
         state = self.agent_states[agent_id]
         
-        if function_result and function_result.info:
-            # Update based on message content
-            if "message" in function_result.info:
-                message = function_result.info["message"].lower()
-                
-                # Check for guilt admission
-                if self.check_guilt_admission(message):
-                    print(f"\n{agent_id.capitalize()} has admitted guilt! Game Over!")
-                    self.game_over = True
-                    
-                # Adjust suspicion based on defensive language
-                defensive_words = {"never", "absolutely not", "ridiculous", "how dare"}
-                if any(word in message for word in defensive_words):
-                    state.suspicion_level = min(10, state.suspicion_level + 1)
-                    
-            # Update based on information sharing
-            if "info_type" in function_result.info:
-                if function_result.info["info_type"] not in state.knowledge["revealed_info"]:
-                    state.knowledge["revealed_info"].append(function_result.info["info_type"])
-
-    def agent_thread_function(self, agent_id: str):
-        """Background thread function for autonomous agent behavior"""
-        while self.running and not self.game_over:
-            # Process any pending messages
-            messages = self.message_queue.get_messages(agent_id)
-            for from_id, message in messages:
-                # Update agent knowledge
-                self.agent_states[agent_id].knowledge["other_agent_interactions"].append(
-                    (from_id, message))
-                
-                # Have agent process message
-                result = self.agents[agent_id].step()
-                if result and hasattr(result, 'feedback_message'):
-                    print(f"\n{agent_id.capitalize()}: {result.feedback_message}")
-                
-            # Periodic autonomous actions
-            if random.random() < 0.3:  # 30% chance of autonomous action
-                state = self.agent_states[agent_id]
-                
-                # Share information about player if suspicion is high
-                if state.suspicion_level > 7:
-                    other_agent = "lina" if agent_id == "lisa" else "lisa"
-                    message = "The player is asking too many questions. Be careful."
-                    self.message_queue.send_message(agent_id, other_agent, message)
-                    print(f"\n{agent_id.capitalize()} [to {other_agent.capitalize()}]: {message}")
-                
-                # Possibly reveal more if attraction is high
-                elif state.attraction_level > 8:
-                    guilty_messages = [
-                        "I've been feeling so guilty lately...",
-                        "I wish I could tell you everything...",
-                        "Sometimes I think about coming clean..."
-                    ]
-                    message = random.choice(guilty_messages)
-                    self.message_queue.send_message(agent_id, "player", message)
-                    print(f"\n{agent_id.capitalize()} [to player]: {message}")
-                    
-            # Update agent state
-            result = self.agents[agent_id].step()
-            if result and hasattr(result, 'feedback_message'):
-                print(f"\n{agent_id.capitalize()}: {result.feedback_message}")
+        # If question is about sensitive topics, more likely to inform other agent
+        if question_type in ["embezzlement", "investigation"]:
+            return random.random() < 0.8
+        
+        # If suspicion is high, more likely to warn other agent
+        if state.suspicion_level > 7:
+            return random.random() < 0.9
             
-            time.sleep(AGENT_UPDATE_INTERVAL)
+        # Base chance for other topics
+        return random.random() < 0.3
+
+    def get_warning_message(self, agent_id: str, question_type: str) -> str:
+        """Generate appropriate warning message to other agent"""
+        if question_type == "embezzlement":
+            return f"The player is asking about the missing money. Be careful with your responses."
+        elif question_type == "investigation":
+            return f"Watch out - they're investigating pretty hard."
+        elif self.agent_states[agent_id].suspicion_level > 7:
+            return f"I don't trust this player. Be cautious."
+        return f"Just letting you know - player is asking about {question_type}."
+
+    def process_player_message(self, target_id: str, message: str):
+        """Process and categorize a player message, updating agent states"""
+        # Categorize the question
+        question_type = categorize_question(message)
+        
+        # Update target agent's knowledge
+        state = self.agent_states[target_id]
+        state.player_questions[question_type].append(message)
+        state.knowledge["player_interactions"].append((question_type, message))
+        
+        # Determine if other agent should be informed
+        other_agent = "lina" if target_id == "lisa" else "lisa"
+        if self.should_inform_other_agent(target_id, question_type):
+            warning = self.get_warning_message(target_id, question_type)
+            self.message_queue.send_message(target_id, other_agent, warning)
+            print(f"\n{target_id.capitalize()} [to {other_agent.capitalize()}]: {warning}")
+
+    def parse_player_input(self, user_input: str) -> tuple[Optional[str], Optional[str]]:
+        """Parse player input into target and message components"""
+        # Split only on the first space to preserve spaces in the message
+        parts = user_input.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            return None, None
+            
+        target = parts[0].lower()
+        message = parts[1]
+        return target, message
 
     def start(self):
         """Start the game and agent threads"""
         self.running = True
         self.setup_agents()
         
-        # Start agent threads
-        self.agent_threads = []
-        for agent_id in self.agents:
-            thread = threading.Thread(
-                target=self.agent_thread_function,
-                args=(agent_id,)
-            )
-            thread.daemon = True
-            thread.start()
-            self.agent_threads.append(thread)
-            
         print("Welcome to the Bank Investigation Game!")
         print("You are investigating potential embezzlement at the bank.")
         print("You can talk to Lisa or Lina by typing their name followed by your message.")
@@ -302,28 +297,26 @@ class BankInvestigationGame:
             if user_input.lower() == 'quit':
                 break
                 
-            try:
-                target, message = user_input.split(" ", 1)
-                target = target.lower()
+            target, message = self.parse_player_input(user_input)
+            
+            if target is None or message is None:
+                print("Please use format: <agent_name> <message>")
+                continue
                 
-                if target in self.agents:
-                    # Record player message and increment turn count
-                    self.player_messages.append((target, message))
-                    self.agent_states[target].turn_count += 1
-                    
-                    # Update agent state
-                    self.agent_states[target].knowledge["player_interactions"].append(message)
-                    
-                    # Send message to agent
-                    self.message_queue.send_message("player", target, message)
-                    
-                    # Get agent response
-                    self.agents[target].step()
-                else:
-                    print("Unknown agent. Please specify 'lisa' or 'lina'.")
-                    
-            except ValueError:
-                print("Invalid input. Format: <agent_name> <message>")
+            if target in self.agents:
+                # Process player message and update states
+                self.process_player_message(target, message)
+                self.agent_states[target].turn_count += 1
+                
+                # Send message to target agent
+                self.message_queue.send_message("player", target, message)
+                
+                # Get agent response
+                result = self.agents[target].step()
+                if result and hasattr(result, 'feedback_message'):
+                    print(f"\n{target.capitalize()}: {result.feedback_message}")
+            else:
+                print("Unknown agent. Please specify 'lisa' or 'lina'.")
                 
         self.running = False
 
