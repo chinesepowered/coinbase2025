@@ -11,7 +11,7 @@ from game_sdk.game.custom_types import Function, Argument, FunctionResult, Funct
 
 # Environment variables and configuration
 GAME_API_KEY = os.environ.get("GAME_API_KEY", "apt-ac543a81f4989a38ad474bdb4b1a442f")
-AGENT_UPDATE_INTERVAL = 5  # Seconds between autonomous agent updates
+AGENT_UPDATE_INTERVAL = 15  # Seconds between autonomous agent updates
 
 @dataclass
 class AgentState:
@@ -26,7 +26,7 @@ class AgentState:
         self.knowledge = {
             "player_interactions": [],  # Track what player has said
             "other_agent_interactions": [],  # Track what other agent has shared
-            "revealed_info": set(),  # Track what info this agent has revealed
+            "revealed_info": [],  # Changed from set() to [] for JSON serialization
         }
 
 class MessageQueue:
@@ -164,8 +164,8 @@ class BankInvestigationGame:
         lisa = Agent(
             api_key=GAME_API_KEY,
             name="Lisa",
-            agent_goal="Avoid detection while redirecting suspicion to others",
-            agent_description="A strategic and manipulative individual who carefully manages appearances",
+            agent_goal="Avoid detection from player. Collaborate with Lina about investigation attempts. However, betray Lina if required to preserve self. Secretly attracted to Chinese men.",
+            agent_description="White woman. A strategic and manipulative individual who carefully manages appearances. Willing to betray others for own gain.",
             get_agent_state_fn=self.get_agent_state_fn("lisa"),
             workers=[lisa_worker]
         )
@@ -182,8 +182,8 @@ class BankInvestigationGame:
         lina = Agent(
             api_key=GAME_API_KEY,
             name="Lina",
-            agent_goal="Avoid detection while maintaining moral self-image",
-            agent_description="A conflicted individual struggling between self-preservation and guilt",
+            agent_goal="Avoid detection from player. Collaborate with Lisa about investigation attempts. Secretly attracted to Chinese men.",
+            agent_description="Chinese woman who has a secret fetish for Chinese men. Can be foolish when it comes to emotions and men.",
             get_agent_state_fn=self.get_agent_state_fn("lina"),
             workers=[lina_worker]
         )
@@ -214,7 +214,8 @@ class BankInvestigationGame:
                     
             # Update based on information sharing
             if "info_type" in function_result.info:
-                state.knowledge["revealed_info"].add(function_result.info["info_type"])
+                if function_result.info["info_type"] not in state.knowledge["revealed_info"]:  # Check if not already in list
+                    state.knowledge["revealed_info"].append(function_result.info["info_type"])
                 
             # Update based on deflection attempts
             if "target" in function_result.info:
